@@ -520,7 +520,7 @@ it is all or nothing.")
        (forge--set-topic-field repo topic 'assignee_ids
                                (--map (caddr (assoc it users)) assignees))))))
 
-(cl-defmethod forge--delete-comment
+(cl-defmethod forge--delete-post
   ((_repo forge-gitlab-repository) post)
   (forge--glab-delete
    post
