@@ -60,6 +60,7 @@
    (labels               :closql-table (pullreq-label label))
    (participants)
    (posts                :closql-class forge-pullreq-post)
+   (versions             :closql-class forge-pullreq-version)
    (reactions)
    (review-requests      :closql-table (pullreq-review-request assignee))
    (reviews)
@@ -84,7 +85,16 @@
    (closql-foreign-key   :initform pullreq)
    (closql-class-prefix  :initform "forge-pullreq-")
    (id                   :initarg :id)
+   (thread-id            :initarg :thread-id)
+   (diff-p               :initarg :diff-p)
+   (reply-to             :initarg :reply-to)
    (pullreq              :initarg :pullreq)
+   (head-ref             :initarg :head-ref)
+   (commit-ref           :initarg :commit-ref)
+   (base-ref             :initarg :base-ref)
+   (path                 :initarg :path)
+   (old-line             :initarg :old-line)
+   (new-line             :initarg :new-line)
    (number               :initarg :number)
    (author               :initarg :author)
    (created              :initarg :created)
@@ -101,6 +111,17 @@
    ;; authorAssociation, bodyHTML, bodyText, createdViaEmail,
    ;; editor, id, reactionGroups, resourcePath, url, viewer{*}
    ))
+
+(defclass forge-pullreq-version (forge-object)
+  ((closql-table         :initform pullreq-version)
+   (closql-primary-key   :initform id)
+   (closql-order-by      :initform [(desc id)])
+   (closql-foreign-key   :initform pullreq)
+   (closql-class-prefix  :initform "forge-pullreq-")
+   (id                   :initarg :id)
+   (pullreq              :initarg :pullreq)
+   (head-ref             :initarg :head-ref)
+   (base-ref             :initarg :base-ref)))
 
 ;;; Query
 
@@ -235,6 +256,12 @@ yourself, in which case you probably should not reset either.
     (define-key map [remap magit-visit-thing]  'forge-visit-pullreq)
     map))
 
+(defvar forge-pullreq-diff-section-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap magit-browse-thing] 'forge-browse-pullreq)
+    (define-key map [remap magit-visit-thing]  'forge-show-pullreq-diff)
+    map))
+
 (defun forge-insert-pullreqs ()
   "Insert a list of mostly recent and/or open pull-requests.
 Also see option `forge-topic-list-limit'."
@@ -251,6 +278,71 @@ Also see option `forge-topic-list-limit'."
         (magit-insert-log (format "%s..%s" (oref pullreq base-ref) ref)
                           magit-buffer-log-args)
         (magit-make-margin-overlay nil t)))))
+
+(defun forge--filter-diff-posts-by-version (posts version)
+  (let ((head (oref version head-ref))
+        (base (oref version base-ref)))
+    (cl-remove-if-not (lambda (post)
+                        (with-slots (diff-p head-ref base-ref) post
+                          (and diff-p
+                               (string= head-ref head)
+                               (string= base-ref base))))
+                      posts)))
+
+(defun forge--filter-diff-posts-by-commit (posts commit)
+  (cl-remove-if-not (lambda (post)
+                      (with-slots (diff-p commit-ref) post
+                        (and diff-p (string= commit-ref commit))))
+		    posts))
+
+(defun forge-show-pullreq-diff ()
+  (interactive)
+  (cl-multiple-value-bind (version commit)
+      (magit-section-value-if 'pullreq-diff)
+    (let ((topic forge-buffer-topic)
+	  (pullreq-buffer (current-buffer)))
+      (if commit
+	  (magit-revision-setup-buffer
+	   commit (magit-show-commit--arguments) nil)
+	(with-slots (base-ref head-ref) version
+	  (magit-diff-setup-buffer
+	   (format "%s..%s" base-ref head-ref)
+	   nil (magit-diff-arguments) nil))))))
+
+(defun forge--insert-pullreq-diff-commits (version diff-commits diff-posts)
+  (dolist (commit diff-commits)
+    (cl-multiple-value-bind (id abbrev-id subject) commit
+      (magit-insert-section (pullreq-diff (list version id))
+        (let ((posts (forge--filter-diff-posts-by-commit diff-posts id)))
+          (insert (concat (propertize abbrev-id 'face 'magit-hash)
+                          (format " %-50s " subject)
+                          (when posts
+                            (propertize (format "(%d comments)" (length posts))
+                                        'face 'magit-section-heading)))
+                "\n")))))
+    (insert "\n"))
+
+(defun forge--insert-pullreq-versions (pullreq)
+  (let ((posts (oref pullreq posts))
+        (versions (reverse (oref pullreq versions)))
+        (count 0))
+    (dolist (version versions)
+      (with-slots (base-ref head-ref) version
+        (cl-incf count)
+        (let* ((diff-commits (magit-git-lines "log" "--format=(\"%H\" \"%h\" \"%s\")"
+                                              (format "%s..%s" base-ref head-ref)))
+               (diff-posts (forge--filter-diff-posts-by-version posts version))
+               (comments-nbr (format "(%d comments) " (length diff-posts)))
+               (hide (not (eq count (length versions)))))
+          ;; all the version section are collapsed except for the latest version
+          (magit-insert-section (pullreq-diff (list version) hide)
+            (magit-insert-heading (concat (if (= count (length versions))
+                                              "Latest Version:  "
+                                            (format "Version %d:  " count))
+                                          (when diff-posts comments-nbr)))
+            (forge--insert-pullreq-diff-commits version
+                                                (mapcar #'read diff-commits)
+                                                diff-posts)))))))
 
 (cl-defmethod forge--insert-topic-contents :after ((pullreq forge-pullreq)
                                                    _width _prefix)

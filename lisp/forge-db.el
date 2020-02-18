@@ -195,6 +195,8 @@
     (issue-post
      [(class :not-null)
       (id :not-null :primary-key)
+      thread-id
+      reply-to
       issue
       number
       author
@@ -276,6 +278,7 @@
       (labels          :default eieio-unbound)
       (participants    :default eieio-unbound)
       (posts           :default eieio-unbound)
+      (versions        :default eieio-unbound)
       (reactions       :default eieio-unbound)
       (review-requests :default eieio-unbound)
       (reviews         :default eieio-unbound)
@@ -315,7 +318,16 @@
     (pullreq-post
      [(class :not-null)
       (id :not-null :primary-key)
+      thread-id
+      diff-p
+      reply-to
       pullreq
+      head-ref
+      commit-ref
+      base-ref
+      path
+      old-line
+      new-line
       number
       author
       created
@@ -323,6 +335,16 @@
       body
       (edits :default eieio-unbound)
       (reactions :default eieio-unbound)]
+     (:foreign-key
+      [pullreq] :references pullreq [id]
+      :on-delete :cascade))
+
+    (pullreq-version
+     [(class :not-null)
+      (id :not-null :primary-key)
+      pullreq
+      head-ref
+      base-ref]
      (:foreign-key
       [pullreq] :references pullreq [id]
       :on-delete :cascade))

@@ -63,6 +63,8 @@
    (closql-foreign-key   :initform issue)
    (closql-class-prefix  :initform "forge-issue-")
    (id                   :initarg :id)
+   (thread-id            :initarg :thread-id)
+   (reply-to             :initarg :reply-to)
    (issue                :initarg :issue)
    (number               :initarg :number)
    (author               :initarg :author)

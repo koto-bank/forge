@@ -215,6 +215,7 @@
              (forge-db)
              (forge-pullreq-post
               :id      (forge--object-id pullreq-id .databaseId)
+              :diff-p  nil
               :pullreq pullreq-id
               :number  .databaseId
               :author  .author.login

@@ -123,6 +123,21 @@ This variable has to be customized before `forge' is loaded."
   "Face used for post date in topic view."
   :group 'forge-faces)
 
+(defface forge-post-heading
+  '((t :inherit magit-diff-hunk-heading))
+  "Face used for post heading in topic view."
+  :group 'forge-faces)
+
+(defface forge-post-heading-highlight
+  '((t :inherit magit-diff-hunk-heading-highlight))
+  "Face used for current post heading in topic view."
+  :group 'forge-faces)
+
+(defface forge-post-reply-heading
+  '((t :inherit magit-diff-hunk-heading :extend nil))
+  "Face used for reply post heading in topic view."
+  :group 'forge-faces)
+
 ;;; Class
 
 (defclass forge-topic (forge-post) () :abstract t)
@@ -386,38 +401,72 @@ identifier."
       (forge-buffer-topic topic)
       (forge-buffer-topic-ident ident))))
 
+(defun forge--filter-reply-posts (posts id)
+  (cl-remove-if-not (lambda (post)
+                      (and (oref post reply-to)
+                           (= (oref post reply-to) id)))
+              posts))
+
+(defun forge--section-heading (author created)
+  (let* ((age (magit--age (float-time (date-to-time created))))
+         (relative-created (apply #'format "%s %s ago" age)))
+    (format-spec forge-post-heading-format
+                 `((?a . ,(propertize (or author "(ghost)")
+                                      'font-lock-face 'forge-post-author))
+                   (?c . ,(propertize created 'font-lock-face 'forge-post-date))
+                   (?C . ,(propertize relative-created 'font-lock-face
+                                      'forge-post-date))))))
+
+(defun forge--insert-section (author created body face)
+  (let ((heading (forge--section-heading  author created)))
+    (add-face-text-property 0 (length heading) face t heading)
+    (magit-insert-heading heading)
+    (insert "\n" (forge--fontify-markdown body) "\n\n")))
+
+(defun forge--insert-replies (posts id face)
+  (when-let ((replies (forge--filter-reply-posts posts id))
+             (indent-column 4))
+    (dolist (reply replies)
+      (with-slots (author created body) reply
+        (magit-insert-section section (post reply)
+          (let* ((author (concat (make-string indent-column
+                                              (string-to-char " "))
+                                 author))
+                 (heading (forge--section-heading author created)))
+            (add-face-text-property indent-column (length heading)
+                                    face t heading)
+            (magit-insert-heading heading)
+            (let ((beg (point)))
+              (insert "\n" (forge--fontify-markdown body) "\n\n")
+              (indent-region beg (point) indent-column))))))))
+
 (defun forge-topic-refresh-buffer ()
-  (let ((topic (closql-reload forge-buffer-topic)))
+  (let* ((topic (closql-reload forge-buffer-topic))
+         (posts (oref topic posts)))
     (setq forge-buffer-topic topic)
     (magit-set-header-line-format
      (format "%s: %s" forge-buffer-topic-ident (oref topic title)))
     (magit-insert-section (topicbuf)
+      ;; insert topic headers
       (magit-insert-headers 'forge-topic-headers-hook)
-      (when (and (forge-pullreq-p topic)
-                 (not (oref topic merged)))
-        (magit-insert-section (pullreq topic)
-          (magit-insert-heading "Commits")
-          (forge--insert-pullreq-commits topic)))
-      (dolist (post (cons topic (oref topic posts)))
-        (with-slots (author created body) post
-          (magit-insert-section section (post post)
-            (oset section heading-highlight-face
-                  'magit-diff-hunk-heading-highlight)
-            (let ((heading
-                   (format-spec
-                    forge-post-heading-format
-                    `((?a . ,(propertize (or author "(ghost)")
-                                         'font-lock-face 'forge-post-author))
-                      (?c . ,(propertize created 'font-lock-face 'forge-post-date))
-                      (?C . ,(propertize (apply #'format "%s %s ago"
-                                                (magit--age
-                                                 (float-time
-                                                  (date-to-time created))))
-                                         'font-lock-face 'forge-post-date))))))
-              (add-face-text-property 0 (length heading)
-                                      'magit-diff-hunk-heading t heading)
-              (magit-insert-heading heading))
-            (insert (forge--fontify-markdown body) "\n\n"))))
+      ;; insert pullreq versions
+      (when (forge-pullreq-p topic)
+        (forge--insert-pullreq-versions topic))
+      ;; insert body of the topic
+      (with-slots (author created body) topic
+        (magit-insert-section section (post nil)
+          (oset section heading-highlight-face 'forge-post-heading-highlight)
+          (forge--insert-section author created body 'forge-post-heading)))
+      ;; insert posts related to the topic
+      (dolist (post posts)
+        (unless (or (when (forge-pullreq-p topic) (oref post diff-p))
+                    (oref post reply-to))
+          (with-slots (author created body number) post
+            (magit-insert-section section (post post)
+              (oset section heading-highlight-face 'forge-post-heading-highlight)
+              (forge--insert-section author created body 'forge-post-heading)
+              ;; insert replies to this post
+              (forge--insert-replies posts number 'forge-post-reply-heading)))))
       (when (and (display-images-p)
                  (fboundp 'markdown-display-inline-images))
         (let ((markdown-display-remote-images t))
