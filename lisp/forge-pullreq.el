@@ -24,6 +24,31 @@
 (require 'forge-post)
 (require 'forge-topic)
 
+;;; Faces
+
+(defface forge-pullreq-diff-post-heading
+  `((((class color) (background light))
+     ,@(and (>= emacs-major-version 27) '(:extend t))
+     :background "LightSalmon3")
+    (((class color) (background dark))
+     ,@(and (>= emacs-major-version 27) '(:extend t))
+     :background "salmon4"))
+  "Face used for diff post heading."
+  :group 'magit-faces)
+
+(defface forge-pullreq-diff-post-reply-heading
+  `((((class color) (background light))
+     :background "LightSkyBlue1")
+    (((class color) (background dark))
+     :background "SkyBlue4"))
+  "Face used for diff reply post heading."
+  :group 'magit-faces)
+
+(defface forge-pullreq-diff-delimitation
+  '((t :underline "salmon4" :extend t))
+  "Face used for diff delimitation."
+  :group 'magit-faces)
+
 ;;; Classes
 
 (defclass forge-pullreq (forge-topic)
@@ -262,6 +287,10 @@ yourself, in which case you probably should not reset either.
     (define-key map [remap magit-visit-thing]  'forge-show-pullreq-diff)
     map))
 
+(defvar-local forge--pullreq-version nil)
+(defvar-local forge--pullreq-commit nil)
+(defvar-local forge--pullreq-buffer nil)
+
 (defun forge-insert-pullreqs ()
   "Insert a list of mostly recent and/or open pull-requests.
 Also see option `forge-topic-list-limit'."
@@ -293,21 +322,83 @@ Also see option `forge-topic-list-limit'."
   (cl-remove-if-not (lambda (post)
                       (with-slots (diff-p commit-ref) post
                         (and diff-p (string= commit-ref commit))))
-		    posts))
+                    posts))
+
+;;; Diff
+
+(defun forge--pullreq-diff-goto-line (file line goto-from)
+  (when-let* ((hunk (magit-diff--locate-hunk file line))
+              (hunk-section (car hunk)))
+    (with-slots (content from-range to-range) hunk-section
+      (let* ((range (if goto-from from-range to-range))
+             (start (car range))
+             (cur-line start))
+        (goto-char content)
+        (while (not (= cur-line line))
+          (forward-line)
+          (unless (or (magit-section-value-if 'post)
+                      (string-match-p (if goto-from "\\+" "-")
+                                      (buffer-substring (point) (+ (point) 1))))
+            (cl-incf cur-line)))))))
+
+(defun forge--insert-pullreq-diff-posts (diff-posts)
+  (let* ((inhibit-read-only t)
+         (root-section magit-root-section))
+    (dolist (post diff-posts)
+      (with-slots (reply-to path old-line new-line number author created body) post
+        (unless reply-to
+          (save-excursion
+            ;; goto to the line in diff
+            (if (and old-line (or (not new-line)
+                                  (not (= old-line new-line))))
+                (forge--pullreq-diff-goto-line path old-line t)
+              (forge--pullreq-diff-goto-line path new-line nil))
+            (forward-line)
+            ;; insert post
+            (magit-insert-section section (post post)
+              (oset section heading-highlight-face 'forge-pullreq-diff-post-heading)
+              (forge--insert-section author created body
+                                     'forge-pullreq-diff-post-heading)
+              ;; insert replies of this post
+              (forge--insert-replies diff-posts number
+                                     'forge-pullreq-diff-post-reply-heading)
+	      ;; insert delimitation line
+	      (overlay-put (make-overlay (- (point) 1) (point))
+			   'face 'forge-pullreq-diff-delimitation))
+            (setq magit-root-section root-section)))))))
+
+(defun forge--pullreq-diff-refresh ()
+  (let* ((posts (oref forge-buffer-topic posts))
+         (diff-posts (if forge--pullreq-commit
+                         (forge--filter-diff-posts-by-commit
+                          posts forge--pullreq-commit)
+                       (forge--filter-diff-posts-by-version
+                        posts forge--pullreq-version))))
+    (forge--insert-pullreq-diff-posts diff-posts)
+    (when (buffer-live-p forge--pullreq-buffer)
+      (with-current-buffer forge--pullreq-buffer
+        (magit-refresh)))))
 
 (defun forge-show-pullreq-diff ()
   (interactive)
   (cl-multiple-value-bind (version commit)
       (magit-section-value-if 'pullreq-diff)
     (let ((topic forge-buffer-topic)
-	  (pullreq-buffer (current-buffer)))
-      (if commit
-	  (magit-revision-setup-buffer
-	   commit (magit-show-commit--arguments) nil)
-	(with-slots (base-ref head-ref) version
-	  (magit-diff-setup-buffer
-	   (format "%s..%s" base-ref head-ref)
-	   nil (magit-diff-arguments) nil))))))
+	  (pullreq-buffer (current-buffer))
+	  (buf (if commit
+		   (magit-revision-setup-buffer
+		    commit (magit-show-commit--arguments) nil)
+		 (with-slots (base-ref head-ref) version
+		   (magit-diff-setup-buffer
+		    (format "%s..%s" base-ref head-ref)
+		    nil (magit-diff-arguments) nil)))))
+      (with-current-buffer buf
+	(setq forge--pullreq-version version)
+	(setq forge--pullreq-commit commit)
+	(setq forge--pullreq-buffer pullreq-buffer)
+	(setq forge-buffer-topic topic)
+	(add-hook 'magit-unwind-refresh-hook 'forge--pullreq-diff-refresh nil t)
+	(magit-refresh)))))
 
 (defun forge--insert-pullreq-diff-commits (version diff-commits diff-posts)
   (dolist (commit diff-commits)
