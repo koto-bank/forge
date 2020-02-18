@@ -341,6 +341,32 @@ Also see option `forge-topic-list-limit'."
                                       (buffer-substring (point) (+ (point) 1))))
             (cl-incf cur-line)))))))
 
+(defun forge--pullreq-diff-current-line ()
+  (when-let ((hunk-section (magit-diff-visit--hunk)))
+    (with-slots (content from-range to-range) hunk-section
+      (cl-flet ((get-line (range content skip-prefix)
+                 (let ((line (car range))
+                       (target (line-number-at-pos (point))))
+                   (save-excursion
+                     (goto-char content)
+                     (while (not (eq target (line-number-at-pos (point))))
+                       (forward-line)
+                       (unless (or (magit-section-value-if 'post)
+                                   (string-match-p skip-prefix
+                                                   (buffer-substring
+                                                    (point) (+ (point) 1))))
+                         (cl-incf line))))
+                   line)))
+        (save-excursion
+          (move-beginning-of-line nil)
+          (let ((prefix (buffer-substring (point) (+ (point) 1))))
+            (cond ((string-match-p "-" prefix)
+                   (list (cons 'old (get-line from-range content "\\+"))))
+                  ((string-match-p "\\+" prefix)
+                   (list (cons 'new (get-line to-range content "-"))))
+                  (t (list (cons 'old (get-line from-range content "\\+"))
+                           (cons 'new (get-line to-range content "-")))))))))))
+
 (defun forge--insert-pullreq-diff-posts (diff-posts)
   (let* ((inhibit-read-only t)
          (root-section magit-root-section))

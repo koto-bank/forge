@@ -113,6 +113,7 @@
 (defvar-local forge--buffer-base-branch nil)
 (defvar-local forge--buffer-head-branch nil)
 (defvar-local forge--buffer-post-object nil)
+(defvar-local forge--buffer-post-args nil)
 (defvar-local forge--buffer-issue nil)
 (defvar-local forge--submit-post-function nil)
 (defvar-local forge--cancel-post-function nil)
@@ -168,9 +169,8 @@
   (interactive)
   (save-buffer)
   (if-let ((fn forge--submit-post-function))
-      (funcall fn
-               (forge-get-repository forge--buffer-post-object)
-               forge--buffer-post-object)
+    (apply fn (forge-get-repository forge--buffer-post-object)
+           forge--buffer-post-object forge--buffer-post-args)
     (error "forge--submit-post-function is nil")))
 
 (defun forge--post-submit-callback ()
