@@ -77,6 +77,7 @@
 (define-key magit-branch-section-map (kbd "C-c C-v") 'forge-visit-topic)
 
 (define-key magit-hunk-section-map (kbd "C-c C-n") 'forge-create-diff-post)
+(define-key magit-hunk-section-map [remap magit-visit-thing] 'forge-diff-visit-file)
 
 (transient-append-suffix 'magit-dispatch "%"
   '("'" "Forge" forge-dispatch ?%))

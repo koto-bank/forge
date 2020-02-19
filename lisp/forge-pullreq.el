@@ -326,6 +326,22 @@ Also see option `forge-topic-list-limit'."
 
 ;;; Diff
 
+(defun forge-diff-visit-file (file)
+  (interactive (list (magit-file-at-point t t)))
+  (if forge--pullreq-buffer
+      (when-let* ((line (forge--pullreq-diff-current-line))
+                  (column (- (current-column) 1))
+                  (prefix (buffer-substring (line-beginning-position)
+                                            (+ (line-beginning-position) 1)))
+                  (file-line (if (string-match-p "-" prefix)
+                                 (assoc-default 'old line)
+                               (assoc-default 'new line))))
+        (with-current-buffer (magit-diff-visit-file--internal
+                              file nil #'switch-to-buffer-other-window)
+          (goto-line file-line)
+          (move-to-column column)))
+    (magit-diff-visit-file file)))
+
 (defun forge--pullreq-diff-goto-line (file line goto-from)
   (when-let* ((hunk (magit-diff--locate-hunk file line))
               (hunk-section (car hunk)))
