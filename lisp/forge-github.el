@@ -158,13 +158,14 @@
             (closql-insert
              (forge-db)
              (forge-issue-post
-              :id      (forge--object-id issue-id .databaseId)
-              :issue   issue-id
-              :number  .databaseId
-              :author  .author.login
-              :created .createdAt
-              :updated .updatedAt
-              :body    (forge--sanitize-string .body))
+              :id        (forge--object-id issue-id .databaseId)
+              :reply-to  nil ;; cannot reply on these comments with github api
+              :issue     issue-id
+              :number    .databaseId
+              :author    .author.login
+              :created   .createdAt
+              :updated   .updatedAt
+              :body      (forge--sanitize-string .body))
              t)))
         (when bump
           (forge--set-id-slot repo issue 'assignees .assignees)
@@ -184,7 +185,9 @@
                            (forge-db)
                            (forge-pullreq :id           pullreq-id
                                           :repository   (oref repo id)
-                                          :number       .number)))))
+                                          :number       .number))))
+             (head-ref .headRefOid)
+             (base-ref .baseRefOid))
         (oset pullreq state        (pcase-exhaustive .state
                                      ("MERGED" 'merged)
                                      ("CLOSED" 'closed)
@@ -209,20 +212,61 @@
         (oset pullreq milestone    .milestone)
         (oset pullreq body         (forge--sanitize-string .body))
         .databaseId ; Silence Emacs 25 byte-compiler.
-        (dolist (p .comments)
-          (let-alist p
+        ;; Github API doesn't support pullreq versioning
+        ;; Thus only add the latest version of the pullreq
+        (let ((version (forge-pullreq-version
+                        :pullreq pullreq-id
+                        :head-ref head-ref
+                        :base-ref base-ref)))
+          (closql-insert (forge-db) version t))
+        ;; add posts
+        (dolist (c .comments)
+          (let-alist c
             (closql-insert
              (forge-db)
              (forge-pullreq-post
-              :id      (forge--object-id pullreq-id .databaseId)
-              :diff-p  nil
-              :pullreq pullreq-id
-              :number  .databaseId
-              :author  .author.login
-              :created .createdAt
-              :updated .updatedAt
-              :body    (forge--sanitize-string .body))
+              :id         (forge--object-id pullreq-id .databaseId)
+              :diff-p     nil
+              :reply-to   nil ;; cannot reply on these comments with github api
+              :pullreq    pullreq-id
+              :head-ref   head-ref
+              :commit-ref (when .originalCommit .originalCommit.oid)
+              :base-ref   base-ref
+              :path       .path
+              :old-line   .originalPosition
+              :new-line   .position
+              :number     .databaseId
+              :author     .author.login
+              :created    .createdAt
+              :updated    .updatedAt
+              :body       (forge--sanitize-string .body))
              t)))
+        ;; add diff posts
+        (dolist (thread .reviewThreads)
+	  (let-alist thread
+	    (let* ((new-line (if .line .line .originalLine))
+		   (old-line .originalLine))
+              (dolist (c .comments)
+		(let-alist c
+		  (closql-insert
+		   (forge-db)
+		   (forge-pullreq-post
+                    :id         (forge--object-id pullreq-id .databaseId)
+                    :diff-p     t
+                    :reply-to   (when .replyTo .replyTo.databaseId)
+                    :pullreq    pullreq-id
+                    :head-ref   head-ref
+                    :commit-ref (when .originalCommit .originalCommit.oid)
+                    :base-ref   base-ref
+                    :path       .path
+                    :old-line   old-line
+                    :new-line   new-line
+                    :number     .databaseId
+                    :author     .author.login
+                    :created    .createdAt
+                    :updated    .updatedAt
+                    :body       (forge--sanitize-string .body))
+		   t))))))
         (when bump
           (forge--set-id-slot repo pullreq 'assignees .assignees)
           (forge--set-id-slot repo pullreq 'review-requests
@@ -515,12 +559,40 @@
                     :callback  (forge--post-submit-callback)
                     :errorback (forge--post-submit-errorback)))
 
+(cl-defmethod forge--submit-create-diff-post ((_ forge-github-repository) topic
+                                              &rest args)
+  (cl-multiple-value-bind (version commit file line) args
+    (let* ((commit_id (if commit commit (oref version head-ref)))
+	   (new (assoc-default 'new line))
+	   (line (if new new (assoc-default 'old line)))
+	   (side (if new "RIGHT" "LEFT")))
+      (forge--ghub-post topic "/repos/:owner/:repo/pulls/:number/comments"
+			`((body      . ,(string-trim (buffer-string)))
+                          (commit_id . ,commit_id)
+                          (path      . ,file)
+                          (line      . ,line)
+                          (side      . ,side))
+			:callback  (forge--post-submit-callback)
+			:errorback (forge--post-submit-errorback)))))
+
+(cl-defmethod forge--submit-reply-post ((_ forge-github-repository) topic
+                                        &rest args)
+  (let* ((reply-to (oref (car args) reply-to))
+         (id (if reply-to reply-to (oref (car args) number))))
+    (forge--ghub-post
+     topic
+     (format "/repos/:owner/:repo/pulls/:number/comments/%d/replies" id)
+      `((body     . ,(string-trim (buffer-string))))
+      :callback  (forge--post-submit-callback)
+      :errorback (forge--post-submit-errorback))))
+
 (cl-defmethod forge--submit-edit-post ((_ forge-github-repository) post)
   (forge--ghub-patch post
                      (cl-typecase post
-                       (forge-pullreq "/repos/:owner/:repo/pulls/:number")
-                       (forge-issue   "/repos/:owner/:repo/issues/:number")
-                       (forge-post    "/repos/:owner/:repo/issues/comments/:number"))
+                       (forge-pullreq      "/repos/:owner/:repo/pulls/:number")
+                       (forge-issue        "/repos/:owner/:repo/issues/:number")
+		       (forge-pullreq-post "/repos/:owner/:repo/pulls/comments/:number")
+                       (forge-post         "/repos/:owner/:repo/issues/comments/:number"))
                      (if (cl-typep post 'forge-topic)
                          (let-alist (forge--topic-parse-buffer)
                            `((title . , .title)
@@ -553,7 +625,11 @@
 
 (cl-defmethod forge--delete-post
   ((_repo forge-github-repository) post)
-  (forge--ghub-delete post "/repos/:owner/:repo/issues/comments/:number")
+  (forge--ghub-delete
+   post
+   (if (and (forge-pullreq-post-p post) (oref post diff-p))
+       "/repos/:owner/:repo/pulls/comments/:number"
+     "/repos/:owner/:repo/issues/comments/:number"))
   (closql-delete post)
   (magit-refresh))
 
