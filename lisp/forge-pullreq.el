@@ -426,21 +426,21 @@ Also see option `forge-topic-list-limit'."
   (cl-multiple-value-bind (version commit)
       (magit-section-value-if 'pullreq-diff)
     (let ((topic forge-buffer-topic)
-	  (pullreq-buffer (current-buffer))
-	  (buf (if commit
-		   (magit-revision-setup-buffer
-		    commit (magit-show-commit--arguments) nil)
-		 (with-slots (base-ref head-ref) version
-		   (magit-diff-setup-buffer
-		    (format "%s..%s" base-ref head-ref)
-		    nil (magit-diff-arguments) nil)))))
+          (pullreq-buffer (current-buffer))
+          (buf (if commit
+                   (magit-revision-setup-buffer
+                    commit (magit-show-commit--arguments) nil)
+                 (with-slots (base-ref head-ref) version
+                   (magit-diff-setup-buffer
+                    (format "%s..%s" base-ref head-ref)
+                    nil (magit-diff-arguments) nil)))))
       (with-current-buffer buf
-	(setq forge--pullreq-version version)
-	(setq forge--pullreq-commit commit)
-	(setq forge--pullreq-buffer pullreq-buffer)
-	(setq forge-buffer-topic topic)
-	(add-hook 'magit-unwind-refresh-hook 'forge--pullreq-diff-refresh nil t)
-	(magit-refresh)))))
+        (setq forge--pullreq-version version)
+        (setq forge--pullreq-commit commit)
+        (setq forge--pullreq-buffer pullreq-buffer)
+        (setq forge-buffer-topic topic)
+        (add-hook 'magit-unwind-refresh-hook 'forge--pullreq-diff-refresh nil t)
+        (magit-refresh)))))
 
 (defun forge--insert-pullreq-diff-commits (version diff-commits diff-posts)
   (dolist (commit diff-commits)
