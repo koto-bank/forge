@@ -342,20 +342,26 @@ Also see option `forge-topic-list-limit'."
           (move-to-column column)))
     (magit-diff-visit-file file)))
 
-(defun forge--pullreq-diff-goto-line (file line goto-from)
+(defun forge--pullreq-diff-get-line (file line goto-from)
   (when-let* ((hunk (magit-diff--locate-hunk file line))
               (hunk-section (car hunk)))
-    (with-slots (content from-range to-range) hunk-section
-      (let* ((range (if goto-from from-range to-range))
-             (start (car range))
-             (cur-line start))
-        (goto-char content)
-        (while (not (= cur-line line))
-          (forward-line)
-          (unless (or (magit-section-value-if 'post)
-                      (string-match-p (if goto-from "\\+" "-")
-                                      (buffer-substring (point) (+ (point) 1))))
-            (cl-incf cur-line)))))))
+    (when (and (slot-exists-p hunk-section 'from-range)
+	       (slot-exists-p hunk-section 'to-range))
+      (with-slots (content from-range to-range) hunk-section
+	(let* ((range (if goto-from from-range to-range))
+               (start (car range))
+               (cur-line start))
+	  (save-excursion
+            (goto-char content)
+            (while (and (not (= cur-line line))
+			(not (eobp)))
+              (unless (or (magit-section-value-if 'post)
+			  (string-match-p (if goto-from "\\+" "-")
+					  (buffer-substring (point) (+ (point) 1))))
+		(cl-incf cur-line))
+	      (forward-line))
+	    (unless (= (point) (point-max))
+	      (line-number-at-pos (point)))))))))
 
 (defun forge--pullreq-diff-current-line ()
   (when-let ((hunk-section (magit-diff-visit--hunk)))
@@ -383,30 +389,38 @@ Also see option `forge-topic-list-limit'."
                   (t (list (cons 'old (get-line from-range content "\\+"))
                            (cons 'new (get-line to-range content "-")))))))))))
 
+(defun forge--sort-posts-by-created (posts)
+  (cl-sort posts (lambda (a b)
+		   (cl-flet ((time-created (post)
+			      (date-to-time (oref post created))))
+		     (time-less-p (time-created b) (time-created a))))))
+
 (defun forge--insert-pullreq-diff-posts (diff-posts)
   (let* ((inhibit-read-only t)
-         (root-section magit-root-section))
-    (dolist (post diff-posts)
+         (root-section magit-root-section)
+	 (posts (forge--sort-posts-by-created diff-posts)))
+    (dolist (post posts)
       (with-slots (reply-to path old-line new-line number author created body) post
         (unless reply-to
           (save-excursion
             ;; goto to the line in diff
-            (if (and old-line (or (not new-line)
-                                  (not (= old-line new-line))))
-                (forge--pullreq-diff-goto-line path old-line t)
-              (forge--pullreq-diff-goto-line path new-line nil))
-            (forward-line)
-            ;; insert post
-            (magit-insert-section section (post post)
-              (oset section heading-highlight-face 'forge-pullreq-diff-post-heading)
-              (forge--insert-section author created body
-                                     'forge-pullreq-diff-post-heading)
-              ;; insert replies of this post
-              (forge--insert-replies diff-posts number
-                                     'forge-pullreq-diff-post-reply-heading)
-	      ;; insert delimitation line
-	      (overlay-put (make-overlay (- (point) 1) (point))
-			   'face 'forge-pullreq-diff-delimitation))
+	    (when-let ((line (if (and old-line (or (not new-line)
+					      (not (= old-line new-line))))
+				 (forge--pullreq-diff-get-line path old-line t)
+			       (forge--pullreq-diff-get-line path new-line nil))))
+	      (goto-line line)
+              (forward-line)
+              ;; insert post
+              (magit-insert-section section (post post)
+		(oset section heading-highlight-face 'forge-pullreq-diff-post-heading)
+		(forge--insert-section author created body
+                                       'forge-pullreq-diff-post-heading)
+		;; insert replies of this post
+		(forge--insert-replies posts number
+                                       'forge-pullreq-diff-post-reply-heading)
+		;; insert delimitation line
+		(overlay-put (make-overlay (- (point) 1) (point))
+			     'face 'forge-pullreq-diff-delimitation)))
             (setq magit-root-section root-section)))))))
 
 (defun forge--pullreq-diff-refresh ()
