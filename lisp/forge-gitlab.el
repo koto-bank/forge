@@ -117,26 +117,33 @@
 ;;;; Issues
 
 (cl-defmethod forge--fetch-issues ((repo forge-gitlab-repository) callback until)
-  (let ((cb (let (val cur cnt pos)
+  (let ((cb (let (val cur cnt pos done issues)
               (lambda (cb &optional v)
-                (cond
-                 ((not pos)
-                  (if (setq cur (setq val v))
-                      (progn
-                        (setq pos 1)
-                        (setq cnt (length val))
-                        (forge--msg nil nil nil "Pulling issue %s/%s" pos cnt)
-                        (forge--fetch-issue-posts repo cur cb))
-                    (forge--msg repo t t "Pulling REPO issues")
-                    (funcall callback callback (cons 'issues val))))
-                 (t
-                  (if (setq cur (cdr cur))
-                      (progn
-                        (cl-incf pos)
-                        (forge--msg nil nil nil "Pulling issue %s/%s" pos cnt)
-                        (forge--fetch-issue-posts repo cur cb))
-                    (forge--msg repo t t "Pulling REPO issues")
-                    (funcall callback callback (cons 'issues val)))))))))
+                ;; init vars after fetching issues
+                (setq cur v)
+                (unless val
+                  (setq val v)
+                  (setq cnt (length val))
+                  (setq pos 0)
+                  (setq done t))
+                (if done
+                    (if (= pos cnt)
+                        (progn
+                          (forge--msg repo t t "Fetching REPO issues")
+                          (funcall callback callback (cons 'issues issues)))
+                      (setq cur (nth pos val))
+                      (cl-incf pos)
+                      (forge--msg nil nil nil "Fetching issue %s/%s" pos cnt)
+                      (setq done nil)
+                      (funcall cb cb cur))
+                  (cond
+                   ;; fetch posts
+                   ((not (assq 'posts cur))
+                    (forge--fetch-issue-posts repo cur cb))
+                   ;; done
+                   (t (setq done t)
+                      (add-to-list 'issues cur t)
+                      (funcall cb cb))))))))
     (forge--msg repo t nil "Pulling REPO issues")
     (forge--glab-get repo "/projects/:project/issues"
       `((per_page . 100)
@@ -146,15 +153,15 @@
       :callback (lambda (value _headers _status _req)
                   (funcall cb cb value)))))
 
-(cl-defmethod forge--fetch-issue-posts ((repo forge-gitlab-repository) cur cb)
-  (let-alist (car cur)
+(cl-defmethod forge--fetch-issue-posts ((repo forge-gitlab-repository) issue cb)
+  (let-alist issue
     (forge--glab-get repo
-      (format "/projects/%s/issues/%s/notes" .project_id .iid)
+      (format "/projects/%s/issues/%s/discussions" .project_id .iid)
       '((per_page . 100))
       :unpaginate t
       :callback (lambda (value _headers _status _req)
-                  (setf (alist-get 'notes (car cur)) value)
-                  (funcall cb cb)))))
+                  (setf (alist-get 'posts issue) value)
+                  (funcall cb cb issue)))))
 
 (cl-defmethod forge--update-issue ((repo forge-gitlab-repository) data)
   (emacsql-with-transaction (forge-db)
@@ -184,47 +191,66 @@
           (forge--set-id-slot repo issue 'assignees .assignees)
           (forge--set-id-slot repo issue 'labels .labels))
         .body .id ; Silence Emacs 25 byte-compiler.
-        (dolist (c .notes)
-          (let-alist c
-            (let ((post
-                   (forge-issue-post
-                    :id      (forge--object-id issue-id .id)
-                    :issue   issue-id
-                    :number  .id
-                    :author  .author.username
-                    :created .created_at
-                    :updated .updated_at
-                    :body    (forge--sanitize-string .body))))
-              (closql-insert (forge-db) post t))))))))
+        (dolist (d .posts)
+          (let* ((thread-id (cdr (assq 'id d)))
+                 (notes (cdr (assq 'notes d)))
+                 (reply-to (cdr (assq 'id (car notes)))))
+            (dolist (c notes)
+              (let-alist c
+                (let ((post
+                       (forge-issue-post
+                        :id        (forge--object-id issue-id .id)
+                        :issue     issue-id
+                        :number    .id
+                        :author    .author.username
+                        :created   .created_at
+                        :updated   .updated_at
+                        :body      (forge--sanitize-string .body)
+                        :thread-id thread-id
+                        :reply-to  (unless (zerop (cl-position c notes))
+                                     reply-to))))
+                  (closql-insert (forge-db) post t))))))))))
 
 ;;;; Pullreqs
 
 (cl-defmethod forge--fetch-pullreqs ((repo forge-gitlab-repository) callback until)
-  (let ((cb (let (val cur cnt pos)
+  (let ((cb (let (val cur cnt pos done pullreqs)
               (lambda (cb &optional v)
-                (cond
-                 ((not pos)
-                  (if (setq cur (setq val v))
-                      (progn
-                        (setq pos 1)
-                        (setq cnt (length val))
-                        (forge--msg nil nil nil "Pulling pullreq %s/%s" pos cnt)
-                        (forge--fetch-pullreq-posts repo cur cb))
-                    (forge--msg repo t t "Pulling REPO pullreqs")
-                    (funcall callback callback (cons 'pullreqs val))))
-                 ((not (assq 'source_project (car cur)))
-                  (forge--fetch-pullreq-source-repo repo cur cb))
-                 ((not (assq 'target_project (car cur)))
-                  (forge--fetch-pullreq-target-repo repo cur cb))
-                 (t
-                  (if (setq cur (cdr cur))
-                      (progn
-                        (cl-incf pos)
-                        (forge--msg nil nil nil "Pulling pullreq %s/%s" pos cnt)
-                        (forge--fetch-pullreq-posts repo cur cb))
-                    (forge--msg repo t t "Pulling REPO pullreqs")
-                    (funcall callback callback (cons 'pullreqs val)))))))))
-    (forge--msg repo t nil "Pulling REPO pullreqs")
+                ;; init vars after fetching pullreqs
+                (setq cur v)
+                (unless val
+                  (setq val v)
+                  (setq cnt (length val))
+                  (setq pos 0)
+                  (setq done t))
+                (if done
+                    (if (= pos cnt)
+                        (progn
+                          (forge--msg repo t t "Fetching REPO pullreqs")
+                          (funcall callback callback (cons 'pullreqs pullreqs)))
+                      (setq cur (nth pos val))
+                      (cl-incf pos)
+                      (forge--msg nil nil nil "Fetching pullreq %s/%s" pos cnt)
+                      (setq done nil)
+                      (funcall cb cb cur))
+                  (cond
+                   ;; fetch posts
+                   ((not (assq 'posts cur))
+                    (forge--fetch-pullreq-posts repo cur cb))
+                   ;; fetch versions
+                   ((not (assq 'versions cur))
+                    (forge--fetch-pullreq-versions repo cur cb))
+                   ;; fetch source project
+                   ((not (assq 'source_project cur))
+                    (forge--fetch-pullreq-source-repo repo cur cb))
+                   ;; fetch target project
+                   ((not (assq 'target_project cur))
+                    (forge--fetch-pullreq-target-repo repo cur cb))
+                   ;; done
+                   (t (setq done t)
+                      (add-to-list 'pullreqs cur t)
+                      (funcall cb cb))))))))
+    (forge--msg repo t nil "Fetching REPO pullreqs")
     (forge--glab-get repo "/projects/:project/merge_requests"
       `((per_page . 100)
         (order_by . "updated_at")
@@ -234,43 +260,54 @@
                   (funcall cb cb value)))))
 
 (cl-defmethod forge--fetch-pullreq-posts
-  ((repo forge-gitlab-repository) cur cb)
-  (let-alist (car cur)
+  ((repo forge-gitlab-repository) pullreq cb)
+  (let-alist pullreq
     (forge--glab-get repo
-      (format "/projects/%s/merge_requests/%s/notes" .target_project_id .iid)
+      (format "/projects/%s/merge_requests/%s/discussions" .target_project_id .iid)
       '((per_page . 100))
       :unpaginate t
       :callback (lambda (value _headers _status _req)
-                  (setf (alist-get 'notes (car cur)) value)
-                  (funcall cb cb)))))
+                  (setf (alist-get 'posts pullreq) value)
+                  (funcall cb cb pullreq)))))
+
+(cl-defmethod forge--fetch-pullreq-versions
+  ((repo forge-gitlab-repository) pullreq cb)
+  (let-alist pullreq
+    (forge--glab-get repo
+      (format "/projects/%s/merge_requests/%s/versions" .target_project_id .iid)
+      '((per_page . 100))
+      :unpaginate t
+      :callback (lambda (value _headers _status _req)
+                  (setf (alist-get 'versions pullreq) value)
+                  (funcall cb cb pullreq)))))
 
 (cl-defmethod forge--fetch-pullreq-source-repo
-  ((repo forge-gitlab-repository) cur cb)
+  ((repo forge-gitlab-repository) pullreq cb)
   ;; If the fork no longer exists, then `.source_project_id' is nil.
   ;; This will lead to difficulties later on but there is nothing we
   ;; can do about it.
-  (let-alist (car cur)
+  (let-alist pullreq
     (if .source_project_id
         (forge--glab-get repo (format "/projects/%s" .source_project_id) nil
           :errorback (lambda (_err _headers _status _req)
-                       (setf (alist-get 'source_project (car cur)) nil)
-                       (funcall cb cb))
+                       (setf (alist-get 'source_project pullreq) nil)
+                       (funcall cb cb pullreq))
           :callback (lambda (value _headers _status _req)
-                      (setf (alist-get 'source_project (car cur)) value)
-                      (funcall cb cb)))
-      (setf (alist-get 'source_project (car cur)) nil)
-      (funcall cb cb))))
+                      (setf (alist-get 'source_project pullreq) value)
+                      (funcall cb cb pullreq)))
+      (setf (alist-get 'source_project pullreq) nil)
+      (funcall cb cb pullreq))))
 
 (cl-defmethod forge--fetch-pullreq-target-repo
-  ((repo forge-gitlab-repository) cur cb)
-  (let-alist (car cur)
+  ((repo forge-gitlab-repository) pullreq cb)
+  (let-alist pullreq
     (forge--glab-get repo (format "/projects/%s" .target_project_id) nil
       :errorback (lambda (_err _headers _status _req)
-                   (setf (alist-get 'source_project (car cur)) nil)
-                   (funcall cb cb))
+                   (setf (alist-get 'source_project pullreq) nil)
+                   (funcall cb cb pullreq))
       :callback (lambda (value _headers _status _req)
-                  (setf (alist-get 'target_project (car cur)) value)
-                  (funcall cb cb)))))
+                  (setf (alist-get 'target_project pullreq) value)
+                  (funcall cb cb pullreq)))))
 
 (cl-defmethod forge--update-pullreq ((repo forge-gitlab-repository) data)
   (emacsql-with-transaction (forge-db)
@@ -313,18 +350,44 @@
           (forge--set-id-slot repo pullreq 'assignees (list .assignee))
           (forge--set-id-slot repo pullreq 'labels .labels))
         .body .id ; Silence Emacs 25 byte-compiler.
-        (dolist (c .notes)
-          (let-alist c
-            (let ((post
-                   (forge-pullreq-post
-                    :id      (forge--object-id pullreq-id .id)
-                    :pullreq pullreq-id
-                    :number  .id
-                    :author  .author.username
-                    :created .created_at
-                    :updated .updated_at
-                    :body    (forge--sanitize-string .body))))
-              (closql-insert (forge-db) post t))))))))
+        ;; add diff versions
+        (dolist (v .versions)
+          (let-alist v
+            (let* ((version-id (forge--object-id pullreq-id .id))
+                   (version (forge-pullreq-version
+                             :id       version-id
+                             :pullreq  pullreq-id
+                             :number   .id
+                             :head-ref .head_commit_sha
+                             :base-ref .base_commit_sha)))
+              (closql-insert (forge-db) version t))))
+        ;; add posts
+        (dolist (d .posts)
+          (let* ((thread-id (cdr (assq 'id d)))
+                 (notes (cdr (assq 'notes d)))
+                 (reply-to (cdr (assq 'id (car notes)))))
+            (dolist (c notes)
+              (let-alist c
+                (let ((post
+                       (forge-pullreq-post
+                        :id         (forge--object-id pullreq-id .id)
+                        :pullreq    pullreq-id
+                        :number     .id
+                        :author     .author.username
+                        :created    .created_at
+                        :updated    .updated_at
+                        :body       (forge--sanitize-string .body)
+                        :thread-id  thread-id
+                        :diff-p     (string= "DiffNote" .type)
+                        :reply-to   (unless (zerop (cl-position c notes))
+                                      reply-to)
+                        :head-ref   (when .position .position.head_sha)
+                        :commit-ref (when .position .position.start_sha)
+                        :base-ref   (when .position .position.base_sha)
+                        :path       (when .position .position.new_path)
+                        :old-line   (when .position .position.old_line)
+                        :new-line   (when .position .position.new_line))))
+                  (closql-insert (forge-db) post t))))))))))
 
 ;;;; Other
 
