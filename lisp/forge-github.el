@@ -35,6 +35,10 @@
 +of existing tokens and for a list of all available scopes see
 +https://developer.github.com/apps/building-oauth-apps/understanding-scopes-for-oauth-apps.")
 
+(defvar forge-github-headers
+  '(("Accept" . "application/vnd.github.comfort-fade-preview+json"))
+  "Custom Github Headers.")
+
 ;;; Class
 
 (defclass forge-github-repository (forge-repository)
@@ -85,6 +89,7 @@
      `((issues-until       . ,(forge--topics-until repo until 'issue))
        (pullRequests-until . ,(forge--topics-until repo until 'pullreq)))
      :host (oref repo apihost)
+     :headers forge-github-headers
      :auth 'forge)))
 
 (cl-defmethod forge--pull-topic ((repo forge-github-repository) n
@@ -110,6 +115,7 @@
             (when (equal (cdr (assq 'type (cadr err))) "NOT_FOUND")
               (forge--pull-topic repo n t))))
      :host (oref repo apihost)
+     :headers forge-github-headers
      :auth 'forge)))
 
 (cl-defmethod forge--update-repository ((repo forge-github-repository) data)
@@ -165,13 +171,14 @@
             (closql-insert
              (forge-db)
              (forge-issue-post
-              :id      (forge--object-id issue-id .databaseId)
-              :issue   issue-id
-              :number  .databaseId
-              :author  .author.login
-              :created .createdAt
-              :updated .updatedAt
-              :body    (forge--sanitize-string .body))
+              :id        (forge--object-id issue-id .databaseId)
+              :issue     issue-id
+              :number    .databaseId
+              :author    .author.login
+              :created   .createdAt
+              :updated   .updatedAt
+              :body      (forge--sanitize-string .body)
+              :reply-to  nil) ;; cannot reply on these comments with github api
              t)))
         (when bump
           (forge--set-id-slot repo issue 'assignees .assignees)
@@ -191,7 +198,9 @@
                            (forge-db)
                            (forge-pullreq :id           pullreq-id
                                           :repository   (oref repo id)
-                                          :number       .number)))))
+                                          :number       .number))))
+             (head-ref .headRefOid)
+             (base-ref .baseRefOid))
         (oset pullreq state        (pcase-exhaustive .state
                                      ("MERGED" 'merged)
                                      ("CLOSED" 'closed)
@@ -216,19 +225,58 @@
         (oset pullreq milestone    .milestone)
         (oset pullreq body         (forge--sanitize-string .body))
         .databaseId ; Silence Emacs 25 byte-compiler.
-        (dolist (p .comments)
-          (let-alist p
+        ;; Github API doesn't support pullreq versioning
+        ;; Thus only add the latest version of the pullreq
+        (let* ((version-id (forge--object-id pullreq-id 1))
+               (version (forge-pullreq-version :id       version-id
+                                               :pullreq  pullreq-id
+                                               :number   1
+                                               :head-ref head-ref
+                                               :base-ref base-ref)))
+          (closql-insert (forge-db) version t))
+        ;; add posts
+        (dolist (c .comments)
+          (let-alist c
             (closql-insert
              (forge-db)
              (forge-pullreq-post
-              :id      (forge--object-id pullreq-id .databaseId)
-              :pullreq pullreq-id
-              :number  .databaseId
-              :author  .author.login
-              :created .createdAt
-              :updated .updatedAt
-              :body    (forge--sanitize-string .body))
-             t)))
+              :id         (forge--object-id pullreq-id .databaseId)
+              :pullreq    pullreq-id
+              :number     .databaseId
+              :author     .author.login
+              :created    .createdAt
+              :updated    .updatedAt
+              :body       (forge--sanitize-string .body)
+              :diff-p     nil
+              :reply-to   nil) ;; cannot reply on these comments with github api
+              t)))
+        ;; add diff posts
+        (dolist (thread .reviewThreads)
+          (let-alist thread
+            (let ((new-line .line)
+                  (old-line .originalLine)
+                  (new (string= .diffSide "RIGHT")))
+              (dolist (c .comments)
+                (let-alist c
+                  (closql-insert
+                   (forge-db)
+                   (forge-pullreq-post
+                    :id         (forge--object-id pullreq-id .databaseId)
+                    :pullreq    pullreq-id
+                    :number     .databaseId
+                    :author     .author.login
+                    :created    .createdAt
+                    :updated    .updatedAt
+                    :body       (forge--sanitize-string .body)
+                    :diff-p     t
+                    :reply-to   (when .replyTo .replyTo.databaseId)
+                    :head-ref   head-ref
+                    :commit-ref (when .originalCommit .originalCommit.oid)
+                    :base-ref   base-ref
+                    :path       .path
+                    :old-line   (unless new old-line)
+                    :new-line   (when new (if old-line old-line new-line)))
+                   t))))))
         (when bump
           (forge--set-id-slot repo pullreq 'assignees .assignees)
           (forge--set-id-slot repo pullreq 'review-requests
