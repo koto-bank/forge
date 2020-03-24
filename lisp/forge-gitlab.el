@@ -343,6 +343,23 @@ it is all or nothing.")
                   (setf (alist-get 'posts pullreq) value)
                   (funcall cb cb pullreq)))))
 
+(cl-defmethod forge--fetch-pullreq-commits
+  ((repo forge-gitlab-repository) pullreq value versions cb)
+  (if-let* ((version (pop value))
+            (version_id (cdr (assq 'id version))))
+      (let-alist pullreq
+        (forge--glab-get repo
+          (format "/projects/%s/merge_requests/%s/versions/%s"
+                  .target_project_id .iid version_id)
+          '((per_page . 100))
+          :unpaginate t
+          :callback (lambda (data _headers _status _req)
+                      (push data versions)
+                      (forge--fetch-pullreq-commits
+                       repo pullreq value versions cb))))
+    (setf (alist-get 'versions pullreq) versions)
+    (funcall cb cb pullreq)))
+
 (cl-defmethod forge--fetch-pullreq-versions
   ((repo forge-gitlab-repository) pullreq cb)
   (let-alist pullreq
@@ -351,8 +368,7 @@ it is all or nothing.")
       '((per_page . 100))
       :unpaginate t
       :callback (lambda (value _headers _status _req)
-                  (setf (alist-get 'versions pullreq) value)
-                  (funcall cb cb pullreq)))))
+                  (forge--fetch-pullreq-commits repo pullreq value nil cb)))))
 
 (cl-defmethod forge--fetch-pullreq-source-repo
   ((repo forge-gitlab-repository) pullreq cb)
@@ -381,6 +397,16 @@ it is all or nothing.")
       :callback (lambda (value _headers _status _req)
                   (setf (alist-get 'target_project pullreq) value)
                   (funcall cb cb pullreq)))))
+
+(defun forge--glab-diff-string (diffs)
+  (with-temp-buffer
+    (dolist (diff diffs)
+      (let-alist diff
+	(insert (format "diff --git %s %s\n" .old_path .new_path))
+	(insert (format "--- %s\n" .old_path))
+	(insert (format "+++ %s\n" .new_path))
+	(insert .diff)))
+    (buffer-string)))
 
 (cl-defmethod forge--update-pullreq ((repo forge-gitlab-repository) data)
   (emacsql-with-transaction (forge-db)
@@ -432,8 +458,26 @@ it is all or nothing.")
                              :pullreq  pullreq-id
                              :number   .id
                              :head-ref .head_commit_sha
-                             :base-ref .base_commit_sha)))
-              (closql-insert (forge-db) version t))))
+                             :base-ref .base_commit_sha
+                             :diff     (forge--glab-diff-string .diffs))))
+              (closql-insert (forge-db) version t)
+              (dolist (c .commits)
+                (let-alist c
+                  (let ((commit (forge-pullreq-commit
+                                 :id               (forge--object-id version-id .id)
+                                 :version          version-id
+                                 :commit-ref       .id
+                                 :short-commit-ref .short_id
+                                 :title            .title
+                                 :message          .message
+                                 :author_name      .author_name
+                                 :author_email     .author_email
+                                 :authored_date    .authored_date
+                                 :committer_name   .committer_name
+                                 :committer_email  .committer_email
+                                 :committed_date   .committed_date
+                                 :diff             nil)))
+                    (closql-insert (forge-db) commit t)))))))
         ;; add posts
         (dolist (d .posts)
           (let* ((thread-id (cdr (assq 'id d)))
@@ -461,6 +505,15 @@ it is all or nothing.")
                         :old-line   (when .position .position.old_line)
                         :new-line   (when .position .position.new_line))))
                   (closql-insert (forge-db) post t))))))))))
+
+;;;; Fetch Pullreqs diff
+
+(cl-defmethod forge--fetch-pullreq-diff
+  ((repo forge-gitlab-repository) (commit forge-pullreq-commit))
+  (let* ((resource (format "/projects/:project/repository/commits/%s/diff"
+                           (oref commit commit-ref)))
+         (data (forge--glab-get repo resource)))
+    (closql-oset commit 'diff (forge--glab-diff-string data))))
 
 ;;;; Other
 

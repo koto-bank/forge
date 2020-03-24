@@ -80,7 +80,6 @@
    (body                 :initarg :body)
    (assignees            :closql-table (pullreq-assignee assignee))
    (project-cards) ; projectsCards
-   (commits)
    (edits) ; userContentEdits
    (labels               :closql-table (pullreq-label label))
    (participants)
@@ -148,7 +147,30 @@
    (pullreq              :initarg :pullreq)
    (number               :initarg :number)
    (head-ref             :initarg :head-ref)
-   (base-ref             :initarg :base-ref)))
+   (base-ref             :initarg :base-ref)
+   (diff                 :initarg :diff)
+   (commits              :closql-class forge-pullreq-commit)))
+
+(defclass forge-pullreq-commit (forge-object)
+  ((closql-table         :initform pullreq-commit)
+   (closql-primary-key   :initform id)
+   (closql-order-by      :initform [(asc number)])
+   (closql-foreign-key   :initform version)
+   (closql-class-prefix  :initform "forge-pullreq-")
+   (id                   :initarg :id)
+   (number               :initarg :number)
+   (version              :initarg :version)
+   (commit-ref           :initarg :commit-ref)
+   (short-commit-ref     :initarg :short-commit-ref)
+   (title                :initarg :title)
+   (message              :initarg :message)
+   (author_name          :initarg :author_name)
+   (author_email         :initarg :author_email)
+   (authored_date        :initarg :authored_date)
+   (committer_name       :initarg :committer_name)
+   (committer_email      :initarg :committer_email)
+   (committed_date       :initarg :committed_date)
+   (diff                 :initarg :diff)))
 
 ;;; Query
 
@@ -313,7 +335,8 @@ Also see option `forge-topic-list-limit'."
 (defun forge--filter-diff-posts-by-commit (posts commit)
   (cl-remove-if-not (lambda (post)
                       (with-slots (diff-p commit-ref) post
-                        (and diff-p (string= commit-ref commit))))
+                        (and diff-p (string= (oref commit commit-ref)
+                                             commit-ref))))
                     posts))
 
 (defun forge--filter-diff-posts-by-version (posts version)
@@ -429,39 +452,102 @@ Also see option `forge-topic-list-limit'."
       (with-current-buffer forge--pullreq-buffer
         (magit-refresh)))))
 
+(defmacro forge--pullreq-setup-buffer (header mode &rest body)
+  (declare (indent 2))
+  `(let ((buffer (magit-get-mode-buffer ,mode))
+         (inhibit-read-only t))
+     (unless buffer
+       (setq buffer (magit-with-toplevel (magit-generate-new-buffer ,mode))))
+     (with-current-buffer buffer
+       (erase-buffer)
+       (delete-all-overlays)
+       (funcall ,mode)
+       (setq-local inhibit-magit-refresh t)
+       (magit-set-header-line-format ,header)
+       (magit-insert-section (diffbuf)
+         ,@body)
+       buffer)))
+
+(defun forge--pullreq-wash-diff ()
+  (magit-diff-wash-diffstat)
+  (when (re-search-forward magit-diff-headline-re nil t)
+    (goto-char (line-beginning-position))
+    (magit-wash-sequence (apply-partially 'magit-diff-wash-diff nil))
+    (insert ?\n)))
+
+(defun forge--commit-setup-buffer (commit)
+  (let ((rev (oref commit commit-ref)))
+    (if (magit-object-type rev)
+        (magit-revision-setup-buffer rev (magit-show-commit--arguments) nil)
+      (unless (oref commit diff)
+        (forge--fetch-pullreq-diff (forge-get-repository nil) commit)
+        (setq commit (closql-reload commit)))
+      (with-slots (commit-ref author_name author_email authored_date
+                              committer_name committer_email committed_date
+                              title message diff) commit
+        (forge--pullreq-setup-buffer (concat "Commit " commit-ref)
+                                     #'magit-revision-mode
+          (magit-insert-section (headers)
+            (insert (propertize commit-ref 'font-lock-face 'magit-hash))
+            (magit-insert-heading)
+            (insert (format "%-11s %s <%s>\n" "Author:"     author_name author_email))
+            (insert (format "%-11s %s\n"      "AuthorDate:" authored_date))
+            (insert (format "%-11s %s <%s>\n" "Commit:"     committer_name committer_email))
+            (insert (format "%-11s %s\n\n"    "CommitDate:" committed_date)))
+          (magit-insert-section section (commit-message)
+            (insert (propertize (format "%s\n" title) 'face 'magit-diff-revision-summary))
+            (magit-insert-heading)
+            (insert "\n" message "\n\n"))
+          (when diff
+            (save-excursion (insert diff))
+            (forge--pullreq-wash-diff)))))))
+
+(defun forge--version-setup-buffer (version)
+  (with-slots (base-ref head-ref) version
+    (if (and (magit-object-type base-ref) (magit-object-type head-ref))
+        (magit-diff-setup-buffer (format "%s..%s" base-ref head-ref)
+                                 nil (magit-diff-arguments) nil)
+      (unless (oref version diff)
+        (forge--fetch-pullreq-diff (forge-get-repository nil) version)
+        (setq version (closql-reload version)))
+      (if-let* ((diff (oref version diff))
+                (header (format "Changes in %s..%s" base-ref head-ref)))
+          (forge--pullreq-setup-buffer header #'magit-diff-mode
+            (save-excursion (insert (oref version diff)))
+            (forge--pullreq-wash-diff))
+        (error "No diff found")))))
+
 (defun forge-show-pullreq-diff ()
   (interactive)
   (cl-multiple-value-bind (version commit)
       (magit-section-value-if 'pullreq-diff)
     (let ((topic forge-buffer-topic)
           (pullreq-buffer (current-buffer))
-          (buf (if commit
-                   (magit-revision-setup-buffer
-                    commit (magit-show-commit--arguments) nil)
-                 (with-slots (base-ref head-ref) version
-                   (magit-diff-setup-buffer
-                    (format "%s..%s" base-ref head-ref)
-                    nil (magit-diff-arguments) nil)))))
-      (with-current-buffer buf
+          (buffer (if commit
+                      (forge--commit-setup-buffer commit)
+                    (forge--version-setup-buffer version))))
+      (with-current-buffer buffer
+        (goto-char (point-min))
         (setq forge--pullreq-version version)
         (setq forge--pullreq-commit commit)
         (setq forge--pullreq-buffer pullreq-buffer)
         (setq forge-buffer-topic topic)
+        (forge--pullreq-diff-refresh)
         (add-hook 'magit-unwind-refresh-hook 'forge--pullreq-diff-refresh nil t)
-        (magit-refresh)))))
+        (magit-display-buffer buffer)))))
 
-(defun forge--insert-pullreq-diff-commits (version diff-commits diff-posts)
-  (dolist (commit diff-commits)
-    (cl-multiple-value-bind (id abbrev-id subject) commit
-      (magit-insert-section (pullreq-diff (list version id))
-        (let ((posts (forge--filter-diff-posts-by-commit diff-posts id)))
-          (insert (concat (propertize abbrev-id 'face 'magit-hash)
-                          (format " %-50s " subject)
+(defun forge--insert-pullreq-diff-commits (version diff-posts)
+  (dolist (commit (oref version commits))
+    (with-slots (short-commit-ref title) commit
+      (magit-insert-section (pullreq-diff (list version commit))
+        (let ((posts (forge--filter-diff-posts-by-commit diff-posts commit)))
+          (insert (concat (propertize short-commit-ref 'face 'magit-hash)
+                          (format " %-50s " title)
                           (when posts
                             (propertize (format "(%d comments)" (length posts))
                                         'face 'magit-section-heading)))
-                "\n")))))
-    (insert "\n"))
+                  "\n")))))
+  (insert "\n"))
 
 (defun forge--insert-pullreq-versions (pullreq)
   (let ((posts (oref pullreq posts))
@@ -470,9 +556,7 @@ Also see option `forge-topic-list-limit'."
     (dolist (version versions)
       (with-slots (base-ref head-ref) version
         (cl-incf count)
-        (let* ((diff-commits (magit-git-lines "log" "--format=(\"%H\" \"%h\" \"%s\")"
-                                              (format "%s..%s" base-ref head-ref)))
-               (diff-posts (forge--filter-diff-posts-by-version posts version))
+        (let* ((diff-posts (forge--filter-diff-posts-by-version posts version))
                (comments-nbr (format "(%d comments) " (length diff-posts)))
                (hide (not (eq count (length versions)))))
           ;; all the version section are collapsed except for the latest version
@@ -481,9 +565,7 @@ Also see option `forge-topic-list-limit'."
                                               "Latest Version:  "
                                             (format "Version %d:  " count))
                                           (when diff-posts comments-nbr)))
-            (forge--insert-pullreq-diff-commits version
-                                                (mapcar #'read diff-commits)
-                                                diff-posts)))))))
+            (forge--insert-pullreq-diff-commits version diff-posts)))))))
 
 (cl-defmethod forge--insert-topic-contents :after ((pullreq forge-pullreq)
                                                    _width _prefix)

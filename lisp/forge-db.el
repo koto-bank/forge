@@ -43,7 +43,7 @@
 (defclass forge-database (closql-database)
   ((object-class :initform forge-repository)))
 
-(defconst forge--db-version 7)
+(defconst forge--db-version 8)
 (defconst forge--sqlite-available-p
   (with-demoted-errors "Forge initialization: %S"
     (emacsql-sqlite-ensure-binary)
@@ -273,7 +273,6 @@
       body
       (assignees       :default eieio-unbound)
       (cards           :default eieio-unbound)
-      (commits         :default eieio-unbound)
       (edits           :default eieio-unbound)
       (labels          :default eieio-unbound)
       (participants    :default eieio-unbound)
@@ -346,9 +345,31 @@
       pullreq
       number
       head-ref
-      base-ref]
+      base-ref
+      diff
+      commits]
      (:foreign-key
       [pullreq] :references pullreq [id]
+      :on-delete :cascade))
+
+    (pullreq-commit
+     [(class :not-null)
+      (id :not-null :primary-key)
+      number
+      version
+      commit-ref
+      short-commit-ref
+      title
+      message
+      author_name
+      author_email
+      authored_date
+      committer_name
+      committer_email
+      committed_date
+      diff]
+     (:foreign-key
+      [version] :references pullreq-version [id]
       :on-delete :cascade))
 
     (pullreq-review-request
@@ -423,6 +444,17 @@
       (emacsql db "PRAGMA user_version = 7")
       (setq version 7)
       (message "Upgrading Forge database from version 6 to 7...done"))
+    (when (= version 7)
+      (message "Upgrading Forge database from version 7 to 8...")
+      (emacsql db [:drop-table pullreq])
+      (pcase-dolist (`(,table . ,schema) forge--db-table-schemata)
+        (when (memq table '(pullreq pullreq-commit))
+          (emacsql db [:create-table $i1 $S2] table schema)))
+      (emacsql db [:alter-table pullreq-version :add-column commits :default $i1] eieio-unbound)
+      (emacsql db [:alter-table pullreq-version :add-column diff :default nil])
+      (emacsql db "PRAGMA user_version = 8")
+      (setq version 8)
+      (message "Upgrading Forge database from version 7 to 8...done"))
     version))
 
 ;;; _

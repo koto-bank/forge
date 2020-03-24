@@ -232,8 +232,29 @@
                                                :pullreq  pullreq-id
                                                :number   1
                                                :head-ref head-ref
-                                               :base-ref base-ref)))
-          (closql-insert (forge-db) version t))
+                                               :base-ref base-ref
+                                               :diff     nil))
+               (commit-number 0))
+          (closql-insert (forge-db) version t)
+          (dolist (c .commits)
+            (let-alist c
+              (cl-incf commit-number)
+              (let ((commit (forge-pullreq-commit
+                             :id               .id
+                             :number           commit-number
+                             :version          version-id
+                             :commit-ref       .commit.oid
+                             :short-commit-ref .commit.abbreviatedOid
+                             :title            .commit.messageHeadline
+                             :message          .commit.messageBody
+                             :author_name      .commit.author.name
+                             :author_email     .commit.author.email
+                             :authored_date    .commit.authoredDate
+                             :committer_name   .commit.committer.name
+                             :committer_email  .commit.committer.email
+                             :committed_date   .commit.committedDate
+                             :diff             nil)))
+                (closql-insert (forge-db) commit t)))))
         ;; add posts
         (dolist (c .comments)
           (let-alist c
@@ -339,6 +360,44 @@
                             (concat "#" (downcase .color))
                             .description)))
                   (delete-dups data)))))
+
+;;;; Fetch Pullreqs diff
+
+(defun forge--ghub-clean-diff (diff)
+  (with-temp-buffer
+    (insert diff)
+    (goto-char (point-min))
+    (while (re-search-forward "^\\(---\\|\+\+\+\\) [ab]/\\(.*\\)" nil t)
+      (replace-match "\\1 \\2"))
+    (buffer-string)))
+
+(cl-defmethod forge--fetch-pullreq-diff
+  ((repo forge-github-repository) (version forge-pullreq-version))
+  (let* ((pullreq (closql-get (forge-db) (oref version pullreq) 'forge-pullreq))
+         (resource (format "/repos/:owner/:repo/pulls/%d" (oref pullreq number)))
+         (data (forge--ghub-get repo resource nil
+                 :headers '(("Accept" . "application/vnd.github.v3.diff"))))
+         (diff (forge--ghub-clean-diff (cdr (assq 'message data)))))
+    (closql-oset version 'diff diff)))
+
+(cl-defmethod forge--fetch-pullreq-diff
+  ((repo forge-github-repository) (commit forge-pullreq-commit))
+  (let* ((version (closql-get (forge-db) (oref commit version) 'forge-pullreq-version))
+         (commits (oref version commits))
+         (pullreq (closql-get (forge-db) (oref version pullreq) 'forge-pullreq))
+         (resource (format "/repos/:owner/:repo/pulls/%d" (oref pullreq number)))
+         (data (forge--ghub-get repo resource nil
+                 :headers '(("Accept" . "application/vnd.github.v3.patch"))))
+         (patch (forge--ghub-clean-diff (cdr (assq 'message data)))))
+    (with-temp-buffer
+      (insert patch)
+      (dolist (commit (reverse commits))
+        (goto-char (point-max))
+        (when (re-search-backward (concat "^From " (oref commit commit-ref)))
+          (let ((start (point)))
+            (when (re-search-forward "^---\n")
+              (closql-oset commit 'diff (buffer-substring (point) (point-max))))
+            (delete-region start (point-max))))))))
 
 ;;;; Notifications
 
